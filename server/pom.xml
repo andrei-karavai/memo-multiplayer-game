@@ -1,53 +1,43 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://apache.org"
          xmlns:xsi="http://w3.org"
-         xsi:schemaLocation="http://apache.org http://apache.org">
+         xsi:schemaLocation="http://apache.org https://apache.org">
     <modelVersion>4.0.0</modelVersion>
 
-    <!-- Spring Boot Parent Framework Definitions -->
+    <!-- Spring Boot Starter Parent: Automatically handles version management and defaults -->
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.2.5</version>
+        <version>3.3.4</version>
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
 
-
+    <!-- Project Metadata Definitions -->
     <groupId>com.memo</groupId>
     <artifactId>server</artifactId>
-    <version>1.0-SNAPSHOT</version>
-    <name>Multiplayer Memo Game Server</name>
-    <description>Backend WebSockets Engine for Memory Match Game</description>
+    <version>0.0.1-SNAPSHOT</version>
+    <name>multiplayer-memo-server</name>
+    <description>In-Memory Real-Time WebSocket Server for Multiplayer Memo Game</description>
 
     <properties>
+        <!-- Enforce Java 21 compliance across build lifecycle -->
         <java.version>21</java.version>
-        <maven.compiler.source>21</maven.compiler.source>
-        <maven.compiler.target>21</maven.compiler.target>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 
     <dependencies>
-        <!-- Standard Web Layer for REST Endpoints and MVC structures -->
+        <!-- Core Web Starter: Handles HTTP server lifecycle, logging, and JSON parsing -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
-        <!-- Low-latency Bidirectional Real-Time Communication Protocols -->
+        <!-- WebSocket Starter: Provides low-latency bidirectional network handling infrastructure -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-websocket</artifactId>
         </dependency>
 
-        <!-- Development Tools for Automatic Live Application Reloads -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-devtools</artifactId>
-            <scope>runtime</scope>
-            <optional>true</optional>
-        </dependency>
-
-        <!-- Testing Framework Core Libraries -->
+        <!-- Test Starter: Bundles JUnit 5 and assertion engines for verification phases -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
@@ -57,7 +47,7 @@
 
     <build>
         <plugins>
-            <!-- Specialized Spring Boot Compilation Packaging Engine Plugin -->
+            <!-- Spring Boot Maven Plugin: Packages application into an executable fat-JAR file -->
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
