@@ -32,6 +32,9 @@ public class GameMatch {
     // A thread-safe monotonic counter incremented every time a player turn passes.
     private final AtomicInteger currentTurnIndex;
 
+    // The tracker field, that holds current turn state.
+    private ActiveTurn currentTurn = new ActiveTurn(-1, null);
+
     /**
      * Initializes a new multiplayer game match session with a secure, server-side deck layout.
      *
@@ -91,6 +94,20 @@ public class GameMatch {
     }
 
     /**
+     * Compiles a snapshot of all active player scores converted from thread-safe
+     * atomic containers into standard serializable integers for network distribution.
+     *
+     * @return A map linking player IDs to their current integer scores.
+     */
+    public Map<String, Integer> getAllScores() {
+        Map<String, Integer> currentScoresSnapshot = new java.util.HashMap<>();
+        for (Map.Entry<String, AtomicInteger> entry : playerScores.entrySet()) {
+            currentScoresSnapshot.put(entry.getKey(), entry.getValue().get());
+        }
+        return currentScoresSnapshot;
+    }
+
+    /**
      * Safely increments the target player's pair score utilizing CPU-level lock-free CAS instructions.
      */
     public void incrementPlayerScore(String playerId) {
@@ -106,11 +123,64 @@ public class GameMatch {
         currentTurnIndex.incrementAndGet();
     }
 
+
+    /**
+     * Checks if current card to flip is the first (returns "true") or the second (returns "false") in active turn.
+     */
+    public boolean isFirstCardFlip() {
+
+        return currentTurn.firstCardIndex() == -1;
+    }
+
+    /**
+     * Updates the inner state tracking record depending on the turn progress.
+     * If it is the first card, buffers the values. If it is the second card, resets the buffer.
+     *
+     * @param cardIndex The grid index position of the flipped card.
+     * @param cardValue The verified solution value of the flipped card.
+     */
+    public synchronized void updateTurnState(int cardIndex, String cardValue) {
+
+        if(this.isFirstCardFlip()) {this.currentTurn = new ActiveTurn(cardIndex, cardValue);}
+        else {this.currentTurn = new ActiveTurn(-1, null);}
+    }
+
+    /**
+     * Checks if the value of the second card flipped in the current turn matches the value of the first card,
+     * flipped in the current turn and stored in currentTurn field.
+     *
+     * @param secondCardValue The verified value of the second flipped card.
+     * @return true if both card values are identical, false otherwise.
+     */
+    public boolean checkMatch(String secondCardValue) {
+        return secondCardValue != null && secondCardValue.equals(currentTurn.firstCardValue());
+    }
+
+    /**
+     * Guards against self-matching exploits by verifying if the incoming card index
+     * matches the exact grid index position already flipped as the first card.
+     *
+     * @param cardIndex The grid index position of the requested second card flip.
+     * @return true if the player is clicking the exact same card twice, false otherwise.
+     */
+    public boolean isSameCardClicked(int cardIndex) {
+        return currentTurn.firstCardIndex() == cardIndex;
+    }
+
+    /**
+     * Checks if all cards have been matched and removed from the active game board.
+     *
+     * @return true if no active cards remain visible on the playing grid, false otherwise.
+     */
+    public boolean isBoardCleared() {
+        return !cardVisibilityMap.containsValue(true);
+    }
+
     /**
      * 🔥 GATEKEEPER TRANSACTION METHOD
      * Evaluates a card flip request incoming from the network.
      * The 'synchronized' modifier locks this class instance, guaranteeing that the
-     * check-then-act flow executes as an atomic unit. This prevents competitive multi-threaded
+     * check-then-act flow executes as an atomic unit. This prevents competitive multithreaded
      * message arrival from processing or reading a card's state concurrently.
      *
      * Security check: Only returns the card values if the requested card is actually
@@ -139,4 +209,12 @@ public class GameMatch {
     public synchronized void removeCardFromPlay(int cardIndex) {
         cardVisibilityMap.put(cardIndex, false);
     }
+
+    /**
+      * A turn state wrapper record-(immutable)-class. Used to check the state and content of the first card out of two, that are flipped during a normal turn in the game.
+      *
+      * @param firstCardIndex An integer tracking the position of the first flipped card on the field.
+      * @param firstCardValue A String tracking the server-side solution identity of that first card. (Card content: what is written / drawn on the card)
+      */
+    private record ActiveTurn(int firstCardIndex, String firstCardValue) {}
 }

@@ -15,7 +15,7 @@ import java.security.Principal;
  * Intercepts inbound payload data packets, extracts secure session identities,
  * and handles state processing routing through the in-memory LobbyManager.
  */
-@Controller //@google AI: explanation needed, why exactly this annotation
+@Controller
 public class GameMatchController {
 
     private final LobbyManager lobbyManager;
@@ -32,7 +32,7 @@ public class GameMatchController {
      * Handles card flip request payloads incoming from the network connection.
      * Extracts connection identity from the Principal object to enforce secure validation.
      *
-     * @param matchId   The unique room ID parsed directly out of the URI routing path. //@google AI: Java marks this help as error. Will it work correctly?
+     * @param matchId   The unique room ID parsed directly out of the URI routing path.
      * @param principal The server-validated network session authentication context.
      * @param request   The secure parameter-tampering protected client data packet.
      * @return The compiled broadcast update payload sent directly back to the message broker channel.
