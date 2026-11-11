@@ -94,6 +94,13 @@ public class GameMatch {
     }
 
     /**
+     * Retrieves the index of the first flipped card of current turn.
+     */
+    public int getFirstCardIndex() {
+        return currentTurn.firstCardIndex;
+    }
+
+    /**
      * Compiles a snapshot of all active player scores converted from thread-safe
      * atomic containers into standard serializable integers for network distribution.
      *
