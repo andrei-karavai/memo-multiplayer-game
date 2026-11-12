@@ -1,0 +1,722 @@
+========================================
+FILE: server/pom.xml
+========================================
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://apache.org"
+         xmlns:xsi="http://w3.org"
+         xsi:schemaLocation="http://apache.org https://apache.org">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Spring Boot Starter Parent: Automatically handles version management and defaults -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.3.4</version>
+        <relativePath/> <!-- lookup parent from repository -->
+    </parent>
+
+    <!-- Project Metadata Definitions -->
+    <groupId>com.memo</groupId>
+    <artifactId>server</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <name>multiplayer-memo-server</name>
+    <description>In-Memory Real-Time WebSocket Server for Multiplayer Memo Game</description>
+
+    <properties>
+        <!-- Enforce Java 21 compliance across build lifecycle -->
+        <java.version>21</java.version>
+    </properties>
+
+    <dependencies>
+        <!-- Core Web Starter: Handles HTTP server lifecycle, logging, and JSON parsing -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- WebSocket Starter: Provides low-latency bidirectional network handling infrastructure -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
+
+        <!-- Test Starter: Bundles JUnit 5 and assertion engines for verification phases -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Spring Boot Maven Plugin: Packages application into an executable fat-JAR file -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+
+
+========================================
+FILE: server/src/main/java/com/memo/config/WebSocketConfig.java
+========================================
+package com.memo.config;
+
+import org.springframework.context.annotation.Configuration;
+import org.springframework.messaging.simp.config.MessageBrokerRegistry;
+import org.springframework.web.socket.config.annotation.EnableWebSocketMessageBroker;
+import org.springframework.web.socket.config.annotation.StompEndpointRegistry;
+import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerConfigurer;
+
+/**
+ * Configures STOMP over WebSocket messaging for real-time multiplayer gameplay.
+ *
+ * <ul>
+ *   <li><b>Handshake Endpoint ({@code /ws}):</b> Initial HTTP upgrade URL for client connections.</li>
+ *   <li><b>Application Prefix ({@code /app}):</b> Routes inbound player actions to {@code @MessageMapping} controllers.</li>
+ *   <li><b>Broker Prefix ({@code /topic}):</b> Broadcasts match state updates to all subscribed players.</li>
+ * </ul>
+ */
+@Configuration
+@EnableWebSocketMessageBroker
+public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
+
+    @Override
+    public void configureMessageBroker(MessageBrokerRegistry registry) {
+        registry.enableSimpleBroker("/topic");
+        registry.setApplicationDestinationPrefixes("/app");
+    }
+
+    @Override
+    public void registerStompEndpoints(StompEndpointRegistry registry) {
+
+        // TODO (Module 5): Restrict allowed origin patterns to the exact production frontend domain.
+        registry.addEndpoint("/ws").setAllowedOriginPatterns("*");
+    }
+}
+
+
+========================================
+FILE: server/src/main/java/com/memo/controller/GameMatchController.java
+========================================
+package com.memo.controller;
+
+import com.memo.dto.CardFlipRequest;
+import com.memo.dto.GameRoundUpdate;
+import com.memo.service.LobbyManager;
+import com.memo.model.GameMatch;
+import org.springframework.messaging.handler.annotation.DestinationVariable;
+import org.springframework.messaging.handler.annotation.MessageMapping;
+import org.springframework.messaging.handler.annotation.SendTo;
+import org.springframework.stereotype.Controller;
+
+import java.security.Principal;
+
+/**
+ * Network gateway handling real-time WebSocket traffic for active game turns.
+ * Intercepts inbound payload data packets, extracts secure session identities,
+ * and handles state processing routing through the in-memory LobbyManager.
+ */
+@Controller
+public class GameMatchController {
+
+    private final LobbyManager lobbyManager;
+
+    /**
+     * Constructor Injection ensures clean dependency initialization
+     * and framework decoupling. Spring Boot automatically wires up the running Bean.
+     */
+    public GameMatchController(LobbyManager lobbyManager) {
+        this.lobbyManager = lobbyManager;
+    }
+
+    /**
+     * Handles card flip request payloads incoming from the network connection.
+     * Extracts connection identity from the Principal object to enforce secure validation.
+     *
+     * @param matchId   The unique room ID parsed directly out of the URI routing path.
+     * @param principal The server-validated network session authentication context.
+     * @param request   The secure parameter-tampering protected client data packet.
+     * @return The compiled broadcast update payload sent directly back to the message broker channel.
+     */
+    @MessageMapping("/match/{matchId}/flip")
+    @SendTo("/topic/match/{matchId}")
+    public GameRoundUpdate handleCardFlip(
+            @DestinationVariable String matchId,
+            Principal principal,
+            CardFlipRequest request)  {
+
+        // 0. Check if request JSON payload arrived empty. If yes - silently drop the request.
+        if(request == null) {
+            return  null;
+        }
+
+        // 1. Extracting and validating the Player Identity. Realization below:
+        // 1.1 Check if user with requested name exists and authorized. If not - silently drop the request.
+        if(principal == null || principal.getName() == null) {
+            return null;
+        }
+        // 1.2 Storing the player ID locally without possibility to change it.
+        final String playerId = principal.getName();
+        // 1.3 Check if Match with requested Name exists. If not - silently drop the request.
+        final GameMatch match = this.lobbyManager.getMatch(matchId);
+        if(match == null) {
+            return null;
+        }
+        // 1.4 Check if it actually this player's turn.
+        if(!playerId.equals(match.getActivePlayerId())) {
+            return null;
+        }
+
+
+        // 2. Interact with the Gatekeeper Transaction Layer.
+        // 2.1 Extract the requested card index.
+        final int cardIndex = request.getCardIndex();
+
+        // 2.2 Guard against self-matching exploits (clicking the same card twice)
+        if(match.isSameCardClicked(cardIndex)) {
+            return null;
+        }
+
+        // 2.3 Guard against exploits of already flipped and removed cards
+        final String cardValue = match.validateAndFlipCard(cardIndex);
+        if(cardValue == null) {
+            return null;
+        }
+
+        // 3. Game State Processing (The Complex Layer)
+
+        // 3.1 Prepare tracking variables.
+        final boolean isSecondCard = !match.isFirstCardFlip();
+
+        boolean isMatch = false;
+        String nextPlayerId = playerId;
+        boolean isGameOver = false;
+
+
+        if(!isSecondCard) {
+
+            // 3.2 Processing first card flip.
+            match.updateTurnState(cardIndex, cardValue);
+        }
+        else {
+
+            // 3.3 Processing second card flip.
+            final int firstCardIndex = match.getFirstCardIndex();
+            isMatch = match.checkMatch(cardValue);
+            match.updateTurnState(firstCardIndex, cardValue);
+
+            // 3.3.1 If cards match to each other.
+            if(isMatch) {
+                match.removeCardFromPlay(firstCardIndex);
+                match.removeCardFromPlay(cardIndex);
+                match.incrementPlayerScore(playerId);
+                isGameOver = match.isBoardCleared();
+            }
+
+            // 3.3.2 If cards don't match to each other.
+            else {
+                match.advanceTurn(); //Moves to the next turn and thus automatically changes active player (see method realization).
+                nextPlayerId = match.getActivePlayerId();
+            }
+
+        }
+
+        // 4. Construct and Return the Update Payload
+        return new GameRoundUpdate(playerId, cardIndex, cardValue, isSecondCard, isMatch, nextPlayerId, match.getAllScores(), isGameOver);
+    }
+
+}
+
+
+========================================
+FILE: server/src/main/java/com/memo/dto/CardFlipRequest.java
+========================================
+package com.memo.dto;
+
+public class CardFlipRequest {
+
+    //Keeps the ID of the card, that should be flipped on request to server
+    private int cardIndex;
+
+    /**
+     * Initializes a new card flip request for the card without defining card ID
+     */
+    public CardFlipRequest() {}
+
+    /**
+     * Initializes a new card flip request for the card with defined card ID
+     *
+     * @param cardIndex      ID of the card to be flipped on request to server.
+     */
+    public CardFlipRequest(int cardIndex) {
+        this.cardIndex = cardIndex;
+    }
+
+    /**
+     * Fetches the ID of the card (integer) to be flipped.
+     */
+    public int getCardIndex() {
+        return this.cardIndex;
+    }
+
+    /**
+     * Sets the ID of the card (integer) to be flipped.
+     */
+    public void setCardIndex(int cardIndex) {
+        this.cardIndex = cardIndex;
+    }
+}
+
+
+========================================
+FILE: server/src/main/java/com/memo/dto/GameRoundUpdate.java
+========================================
+package com.memo.dto;
+
+import java.util.Map;
+
+public class GameRoundUpdate {
+
+    //Keeps the ID of the player, who is making his turn right now.
+    private String playerID;
+
+    //Keeps the ID of the card, that should be flipped during the actual part of the turn.
+    private int cardIndex;
+
+    //Keeps the value of the card, that should be flipped during the actual part of the turn.
+    private String cardValue;
+
+    //Keeps the check, whether currently flipped card is the first or the second card for current turn.
+    private boolean isSecondCard;
+
+    //Keeps the check, whether the first and the second cards flipped in current turn match to one another.
+    private boolean isMatch;
+
+    //Keeps the ID of the player, who gets the next turn, if current turn doesn't reveal cards that match one another.
+    private String nextPlayerID;
+
+    //Keeps the actual scores for each player.
+    private Map<String, Integer> scores;
+
+    //Keeps the check, if game is over as a result of current turn (All the cards are revealed and assigned to players).
+    private boolean isGameOver;
+
+    /**
+     * Initializes a new game round update without defining any parameters.
+     */
+    public GameRoundUpdate() {}
+
+    /**
+     * Initializes a new game round update with parameters
+     *
+     * @param playerID      ID of the player, who is making the turn now.
+     * @param cardIndex     ID of the card, that should be flipped during the actual part of the turn.
+     * @param cardValue     Value of the card, that should be flipped during the actual part of the turn.
+     * @param isSecondCard  Flag, whether currently flipped card is the first or the second card for current turn.
+     * @param isMatch       Flag, whether the first and the second cards flipped in current turn match to one another.
+     * @param nextPlayerID  ID of the player, who gets the next turn, if current turn doesn't reveal cards that match one another.
+     * @param scores        Map with actual scores for each participating player.
+     * @param isGameOver    Flag, whether the game is over as a result of current turn.
+     */
+    public GameRoundUpdate(String playerID,
+                           int cardIndex,
+                           String cardValue,
+                           boolean isSecondCard,
+                           boolean isMatch,
+                           String nextPlayerID,
+                           Map<String, Integer> scores,
+                           boolean isGameOver) {
+        this.playerID = playerID;
+        this.cardIndex = cardIndex;
+        this.cardValue = cardValue;
+        this.isSecondCard = isSecondCard;
+        this.isMatch = isMatch;
+        this.nextPlayerID = nextPlayerID;
+        this.scores = scores;
+        this.isGameOver = isGameOver;
+    }
+
+    /**
+     * Fetches the ID of the ID of the player, who is making the turn now.
+     */
+    public String getPlayerID() {
+        return this.playerID;
+    }
+
+    /**
+     * Fetches the ID of the card, that should be flipped during the actual part of the turn.
+     */
+    public int getCardIndex() {
+        return this.cardIndex;
+    }
+
+    /**
+     * Fetches the value of the card, that should be flipped during the actual part of the turn.
+     */
+    public String getCardValue() {
+        return this.cardValue;
+    }
+
+    /**
+     * Fetches the status, whether it is first or the second card to be flipped in current turn.
+     */
+    public boolean isSecondCard() {
+        return this.isSecondCard;
+    }
+
+    /**
+     * Fetches the status, whether two cards flipped in current turn match to one another.
+     */
+    public boolean isMatch() {
+        return this.isMatch;
+    }
+
+    /**
+     * Fetches the ID of the player, who gets the next turn, if current turn doesn't reveal cards that match one another.
+     */
+    public String getNextPlayerID() {
+        return this.nextPlayerID;
+    }
+
+    /**
+     * Fetches the map with actual scores for each participating player.
+     */
+    public Map<String, Integer> getScores() {
+        return this.scores;
+    }
+
+    /**
+     * Fetches the status, whether the game is over as a result of current turn.
+     */
+    public boolean isGameOver() {
+        return isGameOver;
+    }
+
+
+    //Standard setters for the case of object creation using default constructor.
+    public void setPlayerID(String playerID) {
+        this.playerID = playerID;
+    }
+
+    public void setCardIndex(int cardIndex) {
+        this.cardIndex = cardIndex;
+    }
+
+    public void setCardValue(String cardValue) {
+        this.cardValue = cardValue;
+    }
+
+    public void setSecondCard(boolean secondCard) {
+        this.isSecondCard = secondCard;
+    }
+
+    public void setMatch(boolean match) {
+        this.isMatch = match;
+    }
+
+    public void setNextPlayerID(String nextPlayerID) {
+        this.nextPlayerID = nextPlayerID;
+    }
+
+    public void setScores(Map<String, Integer> scores) {
+        this.scores = scores;
+    }
+
+    public void setGameOver(boolean gameOver) {
+        this.isGameOver = gameOver;
+    }
+}
+
+
+========================================
+FILE: server/src/main/java/com/memo/model/GameMatch.java
+========================================
+package com.memo.model;
+
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/**
+ * Represents an active in-memory multiplayer memory match game.
+ * Uses lock-free atomic variables and concurrent collections to ensure thread safety
+ * during simultaneous WebSocket game turns, combined with synchronized compound
+ * validation methods to prevent structural multi-click exploits.
+ */
+public class GameMatch {
+    // Unique identifier tracking this specific game session room across the server.
+    private final String matchId;
+
+    // Server-side source of truth for card values. Array index matches grid position.
+    // Marked final because the layout configuration never changes after initialization.
+    private final List<String> secretDeck;
+
+    // Tracks active card states: true = card is still on the board; false = permanently REMOVED
+    // Uses ConcurrentHashMap to allow multiple threads to safely query card presence.
+    private final Map<Integer, Boolean> cardVisibilityMap;
+
+    // Thread-safe map tracking Player ID -> Current Pair Score using CPU-level CAS operations.
+    private final Map<String, AtomicInteger> playerScores;
+
+    // Ordered list of Player IDs representing the exact sequence of player turns.
+    private final List<String> turnOrder;
+
+    // A thread-safe monotonic counter incremented every time a player turn passes.
+    private final AtomicInteger currentTurnIndex;
+
+    // The tracker field, that holds current turn state.
+    private ActiveTurn currentTurn = new ActiveTurn(-1, null);
+
+    /**
+     * Initializes a new multiplayer game match session with a secure, server-side deck layout.
+     *
+     * @param matchId      The unique room identifier.
+     * @param shuffledDeck The pre-shuffled identity cards array representing the hidden grid.
+     * @param playerIds    The collection of unique player identifiers participating in this match.
+     */
+    public GameMatch(String matchId, List<String> shuffledDeck, List<String> playerIds) {
+        this.matchId = matchId;
+        this.secretDeck = shuffledDeck;
+        this.currentTurnIndex = new AtomicInteger(0);
+        this.turnOrder = playerIds;
+
+        // Populate visibility map: all indices start as true (hidden, but in play on the board)
+        this.cardVisibilityMap = new ConcurrentHashMap<>();
+        for (int i = 0; i < shuffledDeck.size(); i++) {
+            this.cardVisibilityMap.put(i, true);
+        }
+
+        // Initialize starting scores to 0 for every connected player profile
+        this.playerScores = new ConcurrentHashMap<>();
+        for (String playerId : playerIds) {
+            this.playerScores.put(playerId, new AtomicInteger(0));
+        }
+    }
+
+    // --- Core Architecture Pillars & Getters ---
+
+    /**
+     * Fetches the unique room identity string.
+     */
+    public String getMatchId() {
+        return matchId;
+    }
+
+    /**
+     * Retrieves the unmodifiable sequence list of player turns.
+     */
+    public List<String> getTurnOrder() {
+        return turnOrder;
+    }
+
+    /**
+     * Determines which player's turn it is by applying a modulo wheel operation.
+     * Uses the total number of connected players to mathematically map an infinitely
+     * growing turn counter into a permanent, clean rotational sequence.
+     */
+    public String getActivePlayerId() {
+        return turnOrder.get(currentTurnIndex.get() % turnOrder.size());
+    }
+
+    /**
+     * Retrieves the current verified score for a specific player profile.
+     */
+    public int getPlayerScore(String playerId) {
+        return playerScores.getOrDefault(playerId, new AtomicInteger(0)).get();
+    }
+
+    /**
+     * Retrieves the index of the first flipped card of current turn.
+     */
+    public int getFirstCardIndex() {
+        return currentTurn.firstCardIndex;
+    }
+
+    /**
+     * Compiles a snapshot of all active player scores converted from thread-safe
+     * atomic containers into standard serializable integers for network distribution.
+     *
+     * @return A map linking player IDs to their current integer scores.
+     */
+    public Map<String, Integer> getAllScores() {
+        Map<String, Integer> currentScoresSnapshot = new java.util.HashMap<>();
+        for (Map.Entry<String, AtomicInteger> entry : playerScores.entrySet()) {
+            currentScoresSnapshot.put(entry.getKey(), entry.getValue().get());
+        }
+        return currentScoresSnapshot;
+    }
+
+    /**
+     * Safely increments the target player's pair score utilizing CPU-level lock-free CAS instructions.
+     */
+    public void incrementPlayerScore(String playerId) {
+        if (playerScores.containsKey(playerId)) {
+            playerScores.get(playerId).incrementAndGet();
+        }
+    }
+
+    /**
+     * Advances the turn indicator completely lock-free by bumping the atomic counter.
+     */
+    public void advanceTurn() {
+        currentTurnIndex.incrementAndGet();
+    }
+
+
+    /**
+     * Checks if current card to flip is the first (returns "true") or the second (returns "false") in active turn.
+     */
+    public boolean isFirstCardFlip() {
+
+        return currentTurn.firstCardIndex() == -1;
+    }
+
+    /**
+     * Updates the inner state tracking record depending on the turn progress.
+     * If it is the first card, buffers the values. If it is the second card, resets the buffer.
+     *
+     * @param cardIndex The grid index position of the flipped card.
+     * @param cardValue The verified solution value of the flipped card.
+     */
+    public synchronized void updateTurnState(int cardIndex, String cardValue) {
+
+        if(this.isFirstCardFlip()) {this.currentTurn = new ActiveTurn(cardIndex, cardValue);}
+        else {this.currentTurn = new ActiveTurn(-1, null);}
+    }
+
+    /**
+     * Checks if the value of the second card flipped in the current turn matches the value of the first card,
+     * flipped in the current turn and stored in currentTurn field.
+     *
+     * @param secondCardValue The verified value of the second flipped card.
+     * @return true if both card values are identical, false otherwise.
+     */
+    public boolean checkMatch(String secondCardValue) {
+        return secondCardValue != null && secondCardValue.equals(currentTurn.firstCardValue());
+    }
+
+    /**
+     * Guards against self-matching exploits by verifying if the incoming card index
+     * matches the exact grid index position already flipped as the first card.
+     *
+     * @param cardIndex The grid index position of the requested second card flip.
+     * @return true if the player is clicking the exact same card twice, false otherwise.
+     */
+    public boolean isSameCardClicked(int cardIndex) {
+        return currentTurn.firstCardIndex() == cardIndex;
+    }
+
+    /**
+     * Checks if all cards have been matched and removed from the active game board.
+     *
+     * @return true if no active cards remain visible on the playing grid, false otherwise.
+     */
+    public boolean isBoardCleared() {
+        return !cardVisibilityMap.containsValue(true);
+    }
+
+    /**
+     * 🔥 GATEKEEPER TRANSACTION METHOD
+     * Evaluates a card flip request incoming from the network.
+     * The 'synchronized' modifier locks this class instance, guaranteeing that the
+     * check-then-act flow executes as an atomic unit. This prevents competitive multithreaded
+     * message arrival from processing or reading a card's state concurrently.
+     *
+     * Security check: Only returns the card values if the requested card is actually
+     * still validly on the board. Clients never see card values before passing this layer.
+     *
+     * @param cardIndex The index of the targeted card on the grid.
+     * @return The string identity value of the card if valid; null if the card is already out of play.
+     */
+    public synchronized String validateAndFlipCard(int cardIndex) {
+        // 1. Check: Is the card index valid and currently marked as true (in play)?
+        if (cardVisibilityMap.getOrDefault(cardIndex, false)) {
+            // Note: We don't remove it from play here; it only disappears permanently
+            // via removeCardFromPlay() once a full matching pair is verified by the engine.
+            return secretDeck.get(cardIndex);
+        }
+        // 2. Reject: Card has already been cleared or the index is completely invalid.
+        return null;
+    }
+
+    /**
+     * Permanently flags a verified matched pair as out of play, removing it from the board layout.
+     * This method is synchronized to maintain state ordering alignment with the gatekeeper method.
+     *
+     * @param cardIndex The index of the card to be wiped from the active board.
+     */
+    public synchronized void removeCardFromPlay(int cardIndex) {
+        cardVisibilityMap.put(cardIndex, false);
+    }
+
+    /**
+      * A turn state wrapper record-(immutable)-class. Used to check the state and content of the first card out of two, that are flipped during a normal turn in the game.
+      *
+      * @param firstCardIndex An integer tracking the position of the first flipped card on the field.
+      * @param firstCardValue A String tracking the server-side solution identity of that first card. (Card content: what is written / drawn on the card)
+      */
+    private record ActiveTurn(int firstCardIndex, String firstCardValue) {}
+}
+
+
+========================================
+FILE: server/src/main/java/com/memo/service/LobbyManager.java
+========================================
+package com.memo.service;
+
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+import com.memo.model.GameMatch;
+import org.springframework.stereotype.Service;
+
+@Service
+public class LobbyManager {
+
+    //Tracks active matches available on server.
+    private final Map<String, GameMatch> activeMatches;
+
+    /**
+     * Initializes a new LobbyManager.
+     */
+
+    public LobbyManager() {
+        this.activeMatches = new ConcurrentHashMap<>();
+    }
+
+    /**
+     * 1. Creates a new GameMatch object using the passed parameters.
+     * 2. Inserts newly created GameMatch object into activeMatches map using the matchId as the key.
+     * 3. Returns the newly created GameMatch object to the caller.
+     */
+    public GameMatch createMatch(String matchId, List<String> shuffledDeck, List<String> playerIds) {
+       GameMatch gameMatch = new GameMatch(matchId, shuffledDeck, playerIds);
+       activeMatches.put(matchId, gameMatch);
+       return gameMatch;
+    }
+
+    /**
+     * 1. Queries the activeMatches collection using the matchId key.
+     * 2. Returns the associated GameMatch instance found, or returns null if no match with that ID is found among activeMatches.
+     */
+    public GameMatch getMatch(String matchId) {
+        return activeMatches.get(matchId);
+    }
+
+    /**
+     * Removes the entry corresponding to the matchId key from activeMatches map entirely.
+     * This frees up the server's RAM once a game ends or is abandoned.
+     */
+    public void removeMatch(String matchId) {
+        activeMatches.remove(matchId);
+    }
+
+}
+
+
