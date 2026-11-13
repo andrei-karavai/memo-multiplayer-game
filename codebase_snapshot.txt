@@ -273,6 +273,82 @@ public class CardFlipRequest {
 
 
 ========================================
+FILE: server/src/main/java/com/memo/dto/CreateMatchRequest.java
+========================================
+package com.memo.dto;
+
+
+public class CreateMatchRequest {
+
+    // ID (name) of the player (user) creating the match.
+    private String hostPlayerId;
+
+    // Number of card pairs for this match, minimum 16 to maximum 24 pairs.
+    private int pairCount;
+
+    // Number of maximum allowed participating players in this match. Minimum 2 to maximum 4.
+    private int maxPlayers;
+
+    /**
+     * Initializes a new match request without defining parameters of the match.
+     */
+    public CreateMatchRequest() {}
+
+    /**
+     * Initializes a new match request with defined parameters of the match.
+     *
+     * @param hostPlayerId  ID (name) of the player (user) creating the current match.
+     * @param pairCount     Number of card pairs for current match, minimum 16 to maximum 24 pairs.
+     * @param maxPlayers    Number of maximum participating players in current match. Minimum 2 to maximum 4.
+     */
+    public CreateMatchRequest(String hostPlayerId, int pairCount, int maxPlayers) {
+        this.hostPlayerId = hostPlayerId;
+        this.maxPlayers = maxPlayers;
+        this.pairCount = pairCount;
+    }
+
+    /**
+     * Fetches ID (name) of the player, which created current match.
+     */
+    public String getHostPlayerId() { return this.hostPlayerId;}
+
+    /**
+     * Fetches the number of card pairs for current match.
+     */
+    public int getPairCount() {return this.pairCount;}
+
+    /**
+     * Fetches the number maximum allowed participation players for current match.
+     */
+    public int getMaxPlayers() {
+        return this.maxPlayers;
+    }
+
+    /**
+     * Sets ID (name) of the player, who creates (and owns) the current match.
+     */
+    public void setHostPlayerId(String hostPlayerId) {
+        this.hostPlayerId = hostPlayerId;
+    }
+
+    /**
+     * Sets the number of card pairs for current match.
+     */
+    public void setPairCount(int pairCount) {
+        this.pairCount = pairCount;
+    }
+
+    /**
+     * Sets he number maximum allowed participation players for current match.
+     */
+    public void setMaxPlayers(int maxPlayers) {
+        this.maxPlayers = maxPlayers;
+    }
+
+}
+
+
+========================================
 FILE: server/src/main/java/com/memo/dto/GameRoundUpdate.java
 ========================================
 package com.memo.dto;
@@ -428,6 +504,146 @@ public class GameRoundUpdate {
 
     public void setGameOver(boolean gameOver) {
         this.isGameOver = gameOver;
+    }
+}
+
+
+========================================
+FILE: server/src/main/java/com/memo/dto/MatchLobbyResponse.java
+========================================
+package com.memo.dto;
+
+import java.util.List;
+
+public class MatchLobbyResponse {
+
+    // Unique room (match) code/ID.
+    private String matchId;
+
+    // ID (name) of the player (user) creating the match.
+    private String hostPlayerId;
+
+    // IDs (names) of all the players (users) currently seated in the waiting-room.
+    private List<String> playerIds;
+
+    // Number of maximum allowed participating players in this match. Minimum 2 to maximum 4.
+    private int maxPlayers;
+
+    // Number of cards for this match, even, minimum 32 to maximum 48 cards.
+    private int totalCards;
+
+    // True, once the match begins (either automatically when full and start-countdown is out or when the host triggers early start).
+    private boolean isStarted;
+
+    // Time for automatic game start, after the players' number reach maximum in current match.
+    private Long countdownEndEpochMs;
+
+    /**
+     * Initializes a new response for match lobby without defining parameters of the match.
+     */
+    public MatchLobbyResponse() {}
+
+    /**
+     * Initializes a new response for match lobby with defined parameters of the match.
+     *
+     * @param matchId               Unique room (match) code/ID.
+     * @param hostPlayerId          ID (name) of the player (user) creating the current match.
+     * @param playerIds             List of all the players (users) currently seated in the waiting-room.
+     * @param maxPlayers            Number of maximum allowed participating players in this match. Minimum 2 to maximum 4.
+     * @param totalCards            Number of cards for current match, even, minimum 32 to maximum 48 cards.
+     * @param isStarted             Flag, whether the match has begun (either automatically when full and start-countdown is out or when the host triggers early start).
+     * @param countdownEndEpochMs   Time for automatic game start, after the players' number reach maximum in current match.
+     */
+    public MatchLobbyResponse(String matchId,
+                              String hostPlayerId,
+                              List<String> playerIds,
+                              int maxPlayers,
+                              int totalCards,
+                              boolean isStarted,
+                              Long countdownEndEpochMs) {
+        this.matchId = matchId;
+        this.hostPlayerId = hostPlayerId;
+        this.playerIds = playerIds;
+        this.maxPlayers = maxPlayers;
+        this.totalCards = totalCards;
+        this.isStarted = isStarted;
+        this.countdownEndEpochMs = countdownEndEpochMs;
+    }
+
+    public String getMatchId() {
+        return matchId;
+    }
+
+    public void setMatchId(String matchId) {
+        this.matchId = matchId;
+    }
+
+    public String getHostPlayerId() {
+        return hostPlayerId;
+    }
+
+    public void setHostPlayerId(String hostPlayerId) {
+        this.hostPlayerId = hostPlayerId;
+    }
+
+    public List<String> getPlayerIds() {
+        return playerIds;
+    }
+
+    public void setPlayerIds(List<String> playerIds) {
+        this.playerIds = playerIds;
+    }
+
+    public int getMaxPlayers() {
+        return maxPlayers;
+    }
+
+    public void setMaxPlayers(int maxPlayers) {
+        this.maxPlayers = maxPlayers;
+    }
+
+    public int getTotalCards() {
+        return totalCards;
+    }
+
+    public void setTotalCards(int totalCards) {
+        this.totalCards = totalCards;
+    }
+
+    public boolean isStarted() {
+        return isStarted;
+    }
+
+    public void setStarted(boolean started) {
+        isStarted = started;
+    }
+
+    public Long getCountdownEndEpochMs() {
+        return countdownEndEpochMs;
+    }
+
+    public void setCountdownEndEpochMs(Long countdownEndEpochMs) {
+        this.countdownEndEpochMs = countdownEndEpochMs;
+    }
+}
+
+
+========================================
+FILE: server/src/main/java/com/memo/MemoApplication.java
+========================================
+package com.memo;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+/**
+ * Main Spring Boot entry point and root component-scanning anchor.
+ *
+ */
+@SpringBootApplication
+public class MemoApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(MemoApplication.class, args);
     }
 }
 
