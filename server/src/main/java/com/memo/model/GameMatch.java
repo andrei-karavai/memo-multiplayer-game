@@ -1,9 +1,14 @@
 package com.memo.model;
 
 import java.util.List;
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Represents an active in-memory multiplayer memory match game.
@@ -12,6 +17,16 @@ import java.util.concurrent.atomic.AtomicInteger;
  * validation methods to prevent structural multi-click exploits.
  */
 public class GameMatch {
+
+    // Server-enforced delay (in milliseconds) after a mismatched pair so all clients can animate cards flipping back.
+    public static final long MISMATCH_DELAY_MS = 1_500L;
+
+    // Maximum time (in milliseconds) allowed for an active player to complete their turn before automatic skip.
+    public static final long TURN_TIMEOUT_MS = 45_000L;
+
+    // Grace period (in milliseconds) allowing a disconnected player to reconnect before forfeiting their seat.
+    public static final long DISCONNECT_GRACE_MS = 60_000L;
+
     // Unique identifier tracking this specific game session room across the server.
     private final String matchId;
 
@@ -35,18 +50,46 @@ public class GameMatch {
     // The tracker field, that holds current turn state.
     private ActiveTurn currentTurn = new ActiveTurn(-1, null);
 
+    // Shared background executor passed in from LobbyManager for scheduling mismatch and turn timers.
+    private final ScheduledExecutorService scheduler;
+
+    // Callback invoked when the active player's turn timer expires without completing a turn.
+    private final Runnable onTurnTimeoutCallback;
+
+    // Guard flag set to true during the 1500ms mismatch window to block premature card flips.
+    private boolean isResolvingMismatch;
+
+    // Handle for the active 1500ms mismatch lockout release task.
+    private ScheduledFuture<?> mismatchTimerTask;
+
+    // Handle for the active 45-second turn countdown task.
+    private ScheduledFuture<?> turnTimeoutTask;
+
     /**
-     * Initializes a new multiplayer game match session with a secure, server-side deck layout.
+     * Initializes a new multiplayer game match session with a secure, server-side deck layout
+     * and starts the initial turn countdown timer.
      *
-     * @param matchId      The unique room identifier.
-     * @param shuffledDeck The pre-shuffled identity cards array representing the hidden grid.
-     * @param playerIds    The collection of unique player identifiers participating in this match.
+     * @param matchId               The unique room identifier.
+     * @param shuffledDeck          The pre-shuffled identity cards list representing the hidden grid.
+     * @param playerIds             The ordered list of unique player identifiers participating in this match.
+     * @param scheduler             Shared executor service used to schedule mismatch lockouts and turn timeouts.
+     * @param onTurnTimeoutCallback Callback executed by the scheduler when the active player's turn expires.
      */
-    public GameMatch(String matchId, List<String> shuffledDeck, List<String> playerIds) {
+    public GameMatch(String matchId,
+                     List<String> shuffledDeck,
+                     List<String> playerIds,
+                     ScheduledExecutorService scheduler,
+                     Runnable onTurnTimeoutCallback) {
         this.matchId = matchId;
         this.secretDeck = shuffledDeck;
+        this.scheduler = scheduler;
+        this.onTurnTimeoutCallback = onTurnTimeoutCallback;
+
+        this.isResolvingMismatch = false;
+        this.mismatchTimerTask = null;
+        this.turnTimeoutTask = null;
         this.currentTurnIndex = new AtomicInteger(0);
-        this.turnOrder = playerIds;
+        this.turnOrder = new ArrayList<>(playerIds);
 
         // Populate visibility map: all indices start as true (hidden, but in play on the board)
         this.cardVisibilityMap = new ConcurrentHashMap<>();
@@ -59,6 +102,9 @@ public class GameMatch {
         for (String playerId : playerIds) {
             this.playerScores.put(playerId, new AtomicInteger(0));
         }
+
+        // Begin the 45-second turn countdown immediately for the first active player.
+        this.startTurnTimer();
     }
 
     // --- Core Architecture Pillars & Getters ---
@@ -197,6 +243,10 @@ public class GameMatch {
      * @return The string identity value of the card if valid; null if the card is already out of play.
      */
     public synchronized String validateAndFlipCard(int cardIndex) {
+
+        // 0. Reject all flip attempts while clients are animating a mismatched card pair.
+        if (isResolvingMismatch) {return null;}
+
         // 1. Check: Is the card index valid and currently marked as true (in play)?
         if (cardVisibilityMap.getOrDefault(cardIndex, false)) {
             // Note: We don't remove it from play here; it only disappears permanently
@@ -224,4 +274,122 @@ public class GameMatch {
       * @param firstCardValue A String tracking the server-side solution identity of that first card. (Card content: what is written / drawn on the card)
       */
     private record ActiveTurn(int firstCardIndex, String firstCardValue) {}
+
+    /**
+     * Locks the game board for {@link #MISMATCH_DELAY_MS} milliseconds after a failed pair attempt
+     * so all connected clients finish their flip-back animation before the next move is accepted.
+     */
+    public synchronized void startMismatchLockout() {
+        this.isResolvingMismatch = true;
+
+        if(this.mismatchTimerTask != null){
+            this.mismatchTimerTask.cancel(false);
+        }
+
+        if (this.scheduler != null) {
+            this.mismatchTimerTask = scheduler.schedule(
+                    () -> clearMismatchLockout(),
+                    MISMATCH_DELAY_MS,
+                    TimeUnit.MILLISECONDS
+            );
+        }
+    }
+
+    /**
+     * Releases the mismatch board lockout and clears the completed timer handle.
+     */
+    private synchronized void clearMismatchLockout() {
+        this.isResolvingMismatch = false;
+        this.mismatchTimerTask = null;
+    }
+
+    /**
+     * Starts or restarts the {@link #TURN_TIMEOUT_MS} countdown for the current active player.
+     * Any previously running turn timer is cancelled first to prevent overlapping callbacks.
+     */
+    public synchronized void startTurnTimer() {
+        this.cancelTurnTimer();
+        if (this.scheduler != null && this.onTurnTimeoutCallback != null) {
+            this.turnTimeoutTask = scheduler.schedule(this.onTurnTimeoutCallback, TURN_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    /**
+     * Cancels the currently active turn countdown timer if one is scheduled.
+     */
+    public synchronized void cancelTurnTimer() {
+        if(this.turnTimeoutTask != null){
+            this.turnTimeoutTask.cancel(false);
+            this.turnTimeoutTask = null;
+        }
+    }
+
+    /**
+     * Handles an expired turn countdown by discarding any half-flipped card state,
+     * clearing any active mismatch lock, advancing the turn to the next player,
+     * and starting a fresh turn timer.
+     *
+     * @return {@code true} if the turn was advanced; {@code false} if the board is already cleared.
+     */
+    public synchronized boolean handleTurnTimeout() {
+
+        if(isBoardCleared()) {return false;}
+
+        this.currentTurn = new ActiveTurn(-1, null);
+        clearMismatchLockout();
+        advanceTurn();
+        startTurnTimer();
+        return true;
+    }
+
+
+    /**
+     * Cancels all scheduled turn and mismatch timers and clears lockout state.
+     * Called when a match ends or is removed from server memory to prevent orphaned tasks.
+     */
+    public synchronized void cancelAllTimers() {
+        cancelTurnTimer();
+        if(this.mismatchTimerTask != null) {mismatchTimerTask.cancel(false);}
+        clearMismatchLockout();
+    }
+
+    /**
+     * Removes a disconnected player who failed to reconnect within {@link #DISCONNECT_GRACE_MS}.
+     * Adjusts {@code currentTurnIndex} safely so the turn rotation stays aligned without skipping
+     * the next player, and clears any half-flipped card if it was the forfeited player's turn.
+     *
+     * @param playerId Identifier of the player forfeiting the match.
+     * @return {@code true} if the player was removed; {@code false} if not found in this match.
+     */
+    public synchronized boolean removePlayerOnForfeit(String playerId) {
+        int removedIndex = turnOrder.indexOf(playerId);
+        if (removedIndex == -1) {
+            return false;
+        }
+
+        boolean wasActivePlayer = getActivePlayerId().equals(playerId);
+        if (wasActivePlayer) {
+            this.currentTurn = new ActiveTurn(-1, null);
+            clearMismatchLockout();
+        }
+
+        int currentSlot = currentTurnIndex.get() % turnOrder.size();
+        turnOrder.remove(removedIndex);
+        playerScores.remove(playerId);
+
+        if (!turnOrder.isEmpty()) {
+            if (removedIndex < currentSlot) {
+                currentTurnIndex.set(currentSlot - 1);
+            } else {
+                currentTurnIndex.set(currentSlot % turnOrder.size());
+            }
+            if (wasActivePlayer) {
+                startTurnTimer();
+            }
+        } else {
+            cancelAllTimers();
+        }
+        return true;
+    }
+
 }

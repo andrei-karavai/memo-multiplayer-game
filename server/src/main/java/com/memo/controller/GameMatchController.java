@@ -111,12 +111,19 @@ public class GameMatchController {
                 match.removeCardFromPlay(cardIndex);
                 match.incrementPlayerScore(playerId);
                 isGameOver = match.isBoardCleared();
+
+                if(isGameOver) { // Cancels any timer if the game ends.
+                    match.cancelAllTimers();}
+                else { // Starts next turn timer (45 sec) for the bonus turn of current player.
+                    match.startTurnTimer();}
             }
 
             // 3.3.2 If cards don't match to each other.
             else {
                 match.advanceTurn(); //Moves to the next turn and thus automatically changes active player (see method realization).
                 nextPlayerId = match.getActivePlayerId();
+                match.startMismatchLockout(); // Enforces the 1500ms board click-lockout while clients animate cards closing.
+                match.startTurnTimer(); // Restarts the 45-second timer for the turn for the next player.
             }
 
         }

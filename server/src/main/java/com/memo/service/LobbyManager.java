@@ -6,11 +6,16 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+
 
 import com.memo.dto.CreateMatchRequest;
+import com.memo.dto.GameRoundUpdate;
 import com.memo.dto.MatchLobbyResponse;
 import com.memo.model.GameMatch;
 import com.memo.model.LobbyRoom;
+
 
 import jakarta.annotation.PreDestroy;
 import org.springframework.stereotype.Service;
@@ -37,6 +42,10 @@ public class LobbyManager {
 
     private final SimpMessagingTemplate messagingTemplate;
 
+    // Tracks active 60-second disconnect grace timers keyed by playerId so reconnecting players can cancel forfeit.
+    private final Map<String, ScheduledFuture<?>> disconnectTimers;
+
+
     /**
      * Initializes the in-memory lobby and match registries, the background countdown scheduler,
      * and the STOMP messaging template used for real-time lobby broadcasts.
@@ -49,6 +58,7 @@ public class LobbyManager {
         this.activeMatches = new ConcurrentHashMap<>();
         this.scheduler = Executors.newScheduledThreadPool(2);
         this.messagingTemplate = messagingTemplate;
+        this.disconnectTimers = new ConcurrentHashMap<>();
 
     }
 
@@ -228,7 +238,7 @@ public class LobbyManager {
      * 3. Returns the newly created GameMatch object to the caller.
      */
     public GameMatch createMatch(String matchId, List<String> shuffledDeck, List<String> playerIds) {
-        GameMatch gameMatch = new GameMatch(matchId, shuffledDeck, playerIds);
+        GameMatch gameMatch = new GameMatch(matchId, shuffledDeck, playerIds, this.scheduler, () -> handleTurnTimeout(matchId));
         activeMatches.put(matchId, gameMatch);
         return gameMatch;
     }
@@ -246,12 +256,135 @@ public class LobbyManager {
      * This frees up the server's RAM once a game ends or is abandoned.
      */
     public void removeMatch(String matchId) {
-        activeMatches.remove(matchId);
+        GameMatch removed = activeMatches.remove(matchId);
+        if (removed != null) {
+            removed.cancelAllTimers();
+        }
     }
 
     @PreDestroy
     public void shutdownScheduler() {
+
+        disconnectTimers.clear();
+        for (GameMatch match : activeMatches.values()) {
+            match.cancelAllTimers();
+        }
         scheduler.shutdownNow();
     }
+
+    /**
+     * Handles an expired 45-second turn countdown for an active match.
+     * Advances the turn inside {@link GameMatch}, restarts the turn timer for the next player,
+     * and broadcasts a timeout {@link GameRoundUpdate} to {@code /topic/match/{matchId}}.
+     *
+     * @param matchId Unique identifier of the active match whose turn timer expired.
+     */
+    public void handleTurnTimeout(String matchId) {
+        GameMatch match = activeMatches.get(matchId);
+        if (match == null || !match.handleTurnTimeout()) {
+            return;
+        }
+
+        GameRoundUpdate timeoutUpdate = new GameRoundUpdate(
+                "TIMEOUT",
+                -1,
+                null,
+                false,
+                false,
+                match.getActivePlayerId(),
+                match.getAllScores(),
+                false
+        );
+        messagingTemplate.convertAndSend("/topic/match/" + matchId, timeoutUpdate);
+    }
+
+
+    /**
+     * Permanently removes a disconnected player from an active match after the 60-second grace period expires.
+     * Terminates the match if fewer than two players remain, and broadcasts a forfeit {@link GameRoundUpdate}.
+     *
+     * @param matchId  Unique identifier of the active match.
+     * @param playerId Identifier of the player who failed to reconnect in time.
+     */
+    private void forfeitDisconnectedPlayer(String matchId, String playerId) {
+        disconnectTimers.remove(playerId);
+        GameMatch match = activeMatches.get(matchId);
+        if (match == null || !match.removePlayerOnForfeit(playerId)) {
+            return;
+        }
+
+        boolean isGameOver = match.getTurnOrder().size() < 2;
+        if (isGameOver) {
+            match.cancelAllTimers();
+            activeMatches.remove(matchId);
+        }
+
+        String nextPlayerId = match.getTurnOrder().isEmpty() ? null : match.getActivePlayerId();
+        GameRoundUpdate forfeitUpdate = new GameRoundUpdate(
+                playerId,
+                -1,
+                "DISCONNECTED",
+                false,
+                false,
+                nextPlayerId,
+                match.getAllScores(),
+                isGameOver
+        );
+        messagingTemplate.convertAndSend("/topic/match/" + matchId, forfeitUpdate);
+    }
+
+    /**
+     * Handles a player's WebSocket disconnection event.
+     * Immediately removes the player if they are in a pre-game waiting room, or starts a 60-second
+     * reconnection grace timer if they are participating in an active match.
+     *
+     * @param playerId Identifier of the disconnected player.
+     */
+    public void handlePlayerDisconnect(String playerId) {
+        if (playerId == null || playerId.isBlank()) {
+            return;
+        }
+
+        for (LobbyRoom room : waitingRooms.values()) {
+            if (room.getPlayerIds().contains(playerId)) {
+                leaveLobby(room.getMatchId(), playerId);
+                return;
+            }
+        }
+
+        for (GameMatch match : activeMatches.values()) {
+            if (match.getTurnOrder().contains(playerId)) {
+                ScheduledFuture<?> existing = disconnectTimers.remove(playerId);
+                if (existing != null) {
+                    existing.cancel(false);
+                }
+                ScheduledFuture<?> timer = scheduler.schedule(
+                        () -> forfeitDisconnectedPlayer(match.getMatchId(), playerId),
+                        GameMatch.DISCONNECT_GRACE_MS,
+                        TimeUnit.MILLISECONDS
+                );
+                disconnectTimers.put(playerId, timer);
+                return;
+            }
+        }
+    }
+
+    /**
+     * Cancels any active 60-second disconnect grace timer when a player reconnects to the server.
+     *
+     * @param playerId Identifier of the reconnecting player.
+     */
+    public void handlePlayerReconnect(String playerId) {
+        if (playerId == null) {
+            return;
+        }
+        ScheduledFuture<?> pending = disconnectTimers.remove(playerId);
+        if (pending != null) {
+            pending.cancel(false);
+        }
+    }
+
+
+
 
 }
